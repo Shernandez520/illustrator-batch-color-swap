@@ -64,15 +64,16 @@ The log notes which of these happened for each file.
 - **Leave "Delete old spot swatches after replacing them" on.** The old 289 swatch is then removed, so no stray separation is left behind.
 - **Clear "Use SPOT targets only for files whose name contains"** if every file should get the spot.
 
-## Your existing magenta → white workflow
+## Other options
 
-The first time the script runs, it creates a preset called **"Magenta to White (SC-FC)"** that repeats what your old script did:
+- **Use SPOT targets only for files whose name contains:** use this when some jobs print with spot inks and others in full color, and your filenames show which is which (for example `_SPOT`). Matching files get the spot color. Every other file gets the spot's CMYK values instead. Leave it blank to always use spots.
+- **Hide layers named:** hides layers such as a mockup background before saving. Separate several names with commas.
+- **Delete old spot swatches after replacing them:** removes spot swatches matched by a name rule, so old Pantone colors don't linger as extra separations.
+- **Skip files with more than N paths:** a safety valve for very heavy files. Skipped files are listed in the log. The default is 0, which means no limit.
 
-- Files with `SCProduction` in the name: magenta becomes spot "White". Process white and other white spots are also merged into spot "White", and the duplicate white swatches are deleted.
-- All other files: magenta becomes process white (C0 M0 Y0 K0).
-- The `BACKGROUND` layer is hidden.
+## First run
 
-The SC/FC switch is the **"Use SPOT targets only for files whose name contains"** option. It applies to any rule whose target is a spot color, so it works for brand spot colors too.
+The rule list starts empty. A sample preset, **"Example - PANTONE 289 C to 534 C"**, is added to the preset dropdown to show how a brand change is set up. Its CMYK numbers are placeholders, so swap in your own builds or use a reference swatch file.
 
 ## Safety features
 
@@ -83,17 +84,9 @@ The SC/FC switch is the **"Use SPOT targets only for files whose name contains"*
 - **Stop after this file** pauses a batch. Running it again offers to resume. The resume record is cleared once a batch finishes, so the next run starts fresh.
 - Illustrator's pop-ups, such as missing-font warnings, are suppressed during a batch so the run doesn't stall.
 
-## Improvements over the original magenta → white script
-
-- The resume file was never cleared, so a second run on the same folder did nothing.
-- Files with more than 2,000 paths were skipped silently. There's now no limit by default, and if you set one, skipped files are listed in the log.
-- The log file was set up but never written.
-- Originals were overwritten with no backup.
-- Locked or hidden objects and layers, live text, and global swatches were missed.
-
 ## Things to know
 
-- **Multi-page PDFs:** Illustrator opens only page 1 of a PDF. If you overwrite a multi-page PDF, the other pages are lost. The old script had the same problem. Use "Save to another folder" for those files.
+- **Multi-page PDFs:** Illustrator opens only page 1 of a PDF. If you overwrite a multi-page PDF, the other pages are lost. Use "Save to another folder" for those files.
 - **Not changed:** Colors inside placed or embedded images, symbols, patterns and appearance effects aren't changed. Gradient support is marked beta, so spot-check those files.
 - **RGB documents:** RGB documents store colors as RGB. If a CMYK rule finds nothing in an RGB file, add an RGB rule for the same color.
 - **Presets are .json files:** Click **Show Folder** to find them and share them with teammates. Teammates add them with **Import...**.

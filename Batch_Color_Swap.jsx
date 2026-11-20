@@ -13,7 +13,7 @@
    - Save each brand's rules as a preset; share preset .json files with
      teammates via Import.
    - Optional: spot targets only for files whose name contains a keyword
-     (e.g. SCProduction); other files get the spot's CMYK equivalent.
+     (e.g. "_SPOT"); other files get the spot's CMYK equivalent.
    - Covers paths, compound paths, grouped art, live text, gradient stops,
      locked/hidden layers and objects.
    - Writes a CSV log, backs up originals, resumes interrupted runs,
@@ -279,20 +279,20 @@ function bcsMakeRule(name, src, dst, fileFilter) {
     return r;
 }
 
-// Recreates what the original "magenta to white" script did.
-function bcsStarterRules() {
-    var white = { type: "SPOT", spotName: "White", alt: [0, 0, 0, 0], tint: 100, keepTint: true };
+// Example preset created on first run, to show how a brand change is set up.
+// The CMYK numbers are placeholders: replace them with your own builds, or
+// use a reference swatch file so the official Pantone definition is used.
+function bcsExampleRules() {
+    var p534 = { type: "SPOT", spotName: "PANTONE 534 C", alt: [100, 82, 22, 9], tint: 100, keepTint: true };
     return [
-        bcsMakeRule("Process white -> Spot White (SC files)", { type: "CMYK", v: [0, 0, 0, 0] }, white, "SCProduction"),
-        bcsMakeRule("Other white spots -> Spot White (SC files)", { type: "SPOT", spotName: "white", spotMatch: "contains" }, white, "SCProduction"),
-        bcsMakeRule("Magenta -> White", { type: "CMYK", v: [0, 100, 0, 0] }, white, ""),
-        bcsMakeRule("Magenta spot -> White", { type: "SPOT", spotName: "magenta", spotMatch: "contains" }, white, "")
+        bcsMakeRule("Old brand blue (spot) -> PANTONE 534 C", { type: "SPOT", spotName: "PANTONE 289 C", spotMatch: "exact" }, p534, ""),
+        bcsMakeRule("Old brand blue (CMYK build) -> PANTONE 534 C", { type: "CMYK", v: [100, 64, 0, 60] }, p534, "")
     ];
 }
 
 function bcsDefaultSettings() {
     return {
-        rules: bcsStarterRules(),
+        rules: [],
         lastPreset: "",
         rootFolder: "",
         includeSubfolders: true,
@@ -308,8 +308,8 @@ function bcsDefaultSettings() {
         copyUnchanged: true,
         pdfPreset: "[Illustrator Default]",
         preserveEditability: true,
-        spotKeyword: "SCProduction",
-        hideLayers: "BACKGROUND",
+        spotKeyword: "",
+        hideLayers: "",
         maxPaths: 0,
         removeMatchedSpots: true,
         dryRun: false,
@@ -1074,8 +1074,8 @@ function bcsSavePreset(name, rules) {
     var data = { app: "BatchColorSwap", version: BCS.VERSION, name: name, saved: bcsTimestamp(false), rules: rules };
     return bcsWriteText(f, bcsStringify(data)) ? f : null;
 }
-function bcsEnsureStarterPreset() {
-    try { if (!bcsListPresets().length) bcsSavePreset("Magenta to White (SC-FC)", bcsStarterRules()); } catch (e) {}
+function bcsEnsureExamplePreset() {
+    try { if (!bcsListPresets().length) bcsSavePreset("Example - PANTONE 289 C to 534 C", bcsExampleRules()); } catch (e) {}
 }
 function bcsSettingsFile() { return new File(bcsAppFolder().fsName + "/last_settings.json"); }
 function bcsLoadSettings() {
@@ -1946,7 +1946,7 @@ function bcsEnsureLibrary(s, quiet) {
 
 function bcsMain() {
     var s = bcsLoadSettings();
-    bcsEnsureStarterPreset();
+    bcsEnsureExamplePreset();
     bcsEnsureLibrary(s, true);
     while (true) {
         var r = bcsShowMainDialog(s);

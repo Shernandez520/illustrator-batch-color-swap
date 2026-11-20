@@ -43,8 +43,20 @@ vm.createContext(ctx);
 vm.runInContext(src, ctx);
 const S = ctx;
 
+// A two-mode white-ink workflow used as a fixture: files named *SPOTJOB* get a
+// spot "White"; all other files get process white.
+function whiteInkRules() {
+  const white = { type: 'SPOT', spotName: 'White', alt: [0, 0, 0, 0], tint: 100, keepTint: true };
+  return [
+    S.bcsMakeRule('Process white -> Spot White', { type: 'CMYK', v: [0, 0, 0, 0] }, white, 'SPOTJOB'),
+    S.bcsMakeRule('White spot variants -> Spot White', { type: 'SPOT', spotName: 'white', spotMatch: 'contains' }, white, 'SPOTJOB'),
+    S.bcsMakeRule('Magenta -> White', { type: 'CMYK', v: [0, 100, 0, 0] }, white, ''),
+    S.bcsMakeRule('Magenta spot -> White', { type: 'SPOT', spotName: 'magenta', spotMatch: 'contains' }, white, '')
+  ];
+}
 function settings(over) {
   const s = S.bcsDefaultSettings();
+  s.rules = whiteInkRules(); s.spotKeyword = 'SPOTJOB';
   s.hideLayers = ''; s.removeMatchedSpots = false;
   return Object.assign(s, over || {});
 }
@@ -59,8 +71,8 @@ ok('stringify/parse round trip', () => {
   assert.strictEqual(S.bcsParse('"a\\"b\\u0041"'), 'a"bA');
 });
 
-// ---------- Starter preset reproduces original magenta->white ----------
-ok('SC file: magenta -> spot White; process white -> spot White; dup white spots removed', () => {
+// ---------- Two-mode white-ink workflow (spot vs process by filename) ----------
+ok('Spot-mode file: magenta -> spot White; process white -> spot White; dup white spots removed', () => {
   const doc = makeDoc();
   const magSpot = doc.addSpot('Magenta Spot', cmyk(0, 100, 0, 0));
   const white2 = doc.addSpot('WHITE 2', cmyk(0, 0, 0, 0));
@@ -71,7 +83,7 @@ ok('SC file: magenta -> spot White; process white -> spot White; dup white spots
   const e = path(cmyk(100, 0, 0, 0));
   doc.pathItems.push(a, b, c, d, e);
   const s = settings({ removeMatchedSpots: true });
-  const res = S.bcsProcessDocument(doc, s, 'Job123_SCProduction.pdf');
+  const res = S.bcsProcessDocument(doc, s, 'Job123_SPOTJOB.pdf');
   assert.strictEqual(res.status, 'CHANGED');
   for (const p of [a, b, d]) assert.strictEqual(p.fillColor.spot.name, 'White');
   assert.strictEqual(a.strokeColor.spot.name, 'White');
@@ -84,12 +96,12 @@ ok('SC file: magenta -> spot White; process white -> spot White; dup white spots
   assert.strictEqual(res.stats.fills, 4); assert.strictEqual(res.stats.strokes, 1);
 });
 
-ok('FC file: magenta -> process white, whites untouched, no spot created', () => {
+ok('Process-mode file: magenta -> process white, whites untouched, no spot created', () => {
   const doc = makeDoc();
   const a = path(cmyk(0, 100, 0, 0));
   const b = path(cmyk(0, 0, 0, 0));
   doc.pathItems.push(a, b);
-  const res = S.bcsProcessDocument(doc, settings(), 'Job123_FCProduction.pdf');
+  const res = S.bcsProcessDocument(doc, settings(), 'Job123_PROCESS.pdf');
   assert.strictEqual(a.fillColor.typename, 'CMYKColor');
   assert.strictEqual(a.fillColor.magenta, 0);
   assert.strictEqual(res.stats.fills, 1);
@@ -100,7 +112,7 @@ ok('Existing spot "White" is not re-applied (no needless save)', () => {
   const doc = makeDoc();
   const w = doc.addSpot('White', cmyk(0, 0, 0, 0));
   doc.pathItems.push(path(spotColor(w)));
-  const res = S.bcsProcessDocument(doc, settings(), 'x_SCProduction.pdf');
+  const res = S.bcsProcessDocument(doc, settings(), 'x_SPOTJOB.pdf');
   assert.strictEqual(res.status, 'NO_MATCH');
 });
 
@@ -109,7 +121,7 @@ ok('Case-insensitive reuse of existing spot "WHITE", renamed to "White"', () => 
   doc.addSpot('WHITE', cmyk(0, 0, 0, 0));
   const a = path(cmyk(0, 100, 0, 0));
   doc.pathItems.push(a);
-  S.bcsProcessDocument(doc, settings(), 'x_SCProduction.pdf');
+  S.bcsProcessDocument(doc, settings(), 'x_SPOTJOB.pdf');
   assert.strictEqual(doc.spots.length, 1);
   assert.strictEqual(doc.spots[0].name, 'White');
   assert.strictEqual(a.fillColor.spot, doc.spots[0]);
@@ -178,8 +190,8 @@ ok('Tolerance respected', () => {
 });
 
 ok('File filter with ! (NOT) and comma lists', () => {
-  assert.strictEqual(S.bcsFileFilterPasses('!SCProduction', 'a_FCProduction.pdf'), true);
-  assert.strictEqual(S.bcsFileFilterPasses('!SCProduction', 'a_scproduction.pdf'), false);
+  assert.strictEqual(S.bcsFileFilterPasses('!SPOTJOB', 'a_PROCESS.pdf'), true);
+  assert.strictEqual(S.bcsFileFilterPasses('!SPOTJOB', 'a_spotjob.pdf'), false);
   assert.strictEqual(S.bcsFileFilterPasses('foo, bar', 'xBARx.pdf'), true);
   assert.strictEqual(S.bcsFileFilterPasses('', 'x'), true);
 });
@@ -212,7 +224,7 @@ ok('Dry run counts but changes nothing, creates no spots', () => {
   const doc = makeDoc();
   const a = path(cmyk(0, 100, 0, 0));
   doc.pathItems.push(a);
-  const res = S.bcsProcessDocument(doc, settings({ dryRun: true }), 'x_SCProduction.pdf');
+  const res = S.bcsProcessDocument(doc, settings({ dryRun: true }), 'x_SPOTJOB.pdf');
   assert.strictEqual(res.stats.fills, 1); assert.strictEqual(a.fillColor.magenta, 100); assert.strictEqual(doc.spots.length, 0);
 });
 
@@ -336,7 +348,7 @@ ok('Process-mode file with spot target uses the rule CMYK, scaled by tint', () =
   const p = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
   const a = path(spotColor(p, 50)); doc.pathItems.push(a);
   const rules = rule289to534(); rules[0].dst.alt = [70, 30, 0, 40];
-  S.bcsProcessDocument(doc, rulesSettings(rules, { spotKeyword: 'SCProduction' }), 'x_FCProduction.pdf');
+  S.bcsProcessDocument(doc, rulesSettings(rules, { spotKeyword: 'SPOTJOB' }), 'x_PROCESS.pdf');
   assert.deepStrictEqual([a.fillColor.cyan, a.fillColor.black], [35, 20]);
   assert.ok(!doc.spots.find(x => x.name === 'PANTONE 534 C'));
   S.BCS.library = null;
@@ -349,7 +361,7 @@ ok('Settings round trip keeps new fields', () => {
 });
 
 ok('Rule summaries render', () => {
-  S.bcsStarterRules().forEach((r, i) => console.log('      ' + S.bcsRuleSummary(r, i)));
+  S.bcsExampleRules().forEach((r, i) => console.log('      ' + S.bcsRuleSummary(r, i)));
 });
 
 console.log(`\n${pass} tests passed`);
