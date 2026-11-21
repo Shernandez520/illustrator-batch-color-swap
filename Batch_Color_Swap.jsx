@@ -24,10 +24,11 @@
    ========================================================================== */
 
 var BCS = {
-    VERSION: "1.2",
+    VERSION: "1.3",
     library: null,
     libraryPath: "",
     APP_FOLDER_NAME: "BatchColorSwap",
+    refDoc: null,
     BACKUP_FOLDER: "_ORIGINALS",
     FAILED_FOLDER: "FAILED_FILES",
     RESUME_FILE: "_colorswap_resume.txt",
@@ -593,6 +594,88 @@ function bcsFindSpot(doc, key) {
     return null;
 }
 
+// --- Copying the real swatch out of the reference file -------------------
+// Rebuilding a spot from numbers can't produce a Lab-mode swatch from a script.
+// Moving art between documents can: Illustrator carries the swatch across with
+// its original definition, exactly as Pantone Connect made it. So we put a tiny
+// temporary rectangle filled with the reference spot into the target document,
+// then delete the rectangle; the swatch stays behind.
+function bcsOpenRefDoc(path) {
+    if (!bcsTrim(path)) return null;
+    var f = new File(path);
+    if (!f.exists) return null;
+    for (var i = 0; i < app.documents.length; i++) {
+        try { if (app.documents[i].fullName.fsName === f.fsName) return { doc: app.documents[i], opened: false }; } catch (e) {}
+    }
+    return { doc: app.open(f), opened: true };
+}
+
+function bcsCloseRefDoc(handle) {
+    if (handle && handle.opened) { try { handle.doc.close(SaveOptions.DONOTSAVECHANGES); } catch (e) {} }
+}
+
+function bcsImportSpot(targetDoc, refDoc, name) {
+    var key = bcsTrim(name).toLowerCase();
+    var refSpot = bcsFindSpot(refDoc, key);
+    if (!refSpot) return null;
+    var refLayer = null, item = null, tgtLayer = null, dup = null;
+    try {
+        refLayer = refDoc.layers.add();
+        item = refLayer.pathItems.rectangle(0, 0, 1, 1);
+        var sc = new SpotColor();
+        sc.spot = refSpot;
+        sc.tint = 100;
+        item.stroked = false;
+        item.filled = true;
+        item.fillColor = sc;
+        tgtLayer = targetDoc.layers.add();
+        dup = item.duplicate(tgtLayer, ElementPlacement.PLACEATBEGINNING);
+    } catch (e) {
+        // fall through: caller falls back to defining the spot by numbers
+    } finally {
+        try { if (dup) dup.remove(); } catch (e1) {}
+        try { if (tgtLayer) tgtLayer.remove(); } catch (e2) {}
+        try { if (item) item.remove(); } catch (e3) {}
+        try { if (refLayer) refLayer.remove(); } catch (e4) {}
+    }
+    return bcsFindSpot(targetDoc, key);
+}
+
+// Moves every use of the spot named oldName (fills, strokes, text, gradient
+// stops) onto newSpot, keeping each tint. Returns how many were moved.
+function bcsRepointSpot(doc, oldName, newSpot, ctx) {
+    var key = String(oldName).toLowerCase(), n = 0, i, j;
+    function isOld(c) {
+        try { return c.typename === "SpotColor" && String(c.spot.name).toLowerCase() === key; } catch (e) { return false; }
+    }
+    function swap(c) { var sc = new SpotColor(); sc.spot = newSpot; sc.tint = c.tint; return sc; }
+    var paths = doc.pathItems;
+    for (i = 0; i < paths.length; i++) {
+        var p = paths[i], c;
+        try { if (p.filled && isOld(p.fillColor)) { c = swap(p.fillColor); if (bcsSafeSet(p, function () { p.fillColor = c; }, ctx)) n++; } } catch (e1) {}
+        try { if (p.stroked && isOld(p.strokeColor)) { c = swap(p.strokeColor); if (bcsSafeSet(p, function () { p.strokeColor = c; }, ctx)) n++; } } catch (e2) {}
+    }
+    var tfs = doc.textFrames;
+    for (i = 0; i < tfs.length; i++) {
+        var chars;
+        try { chars = tfs[i].textRange.characters; } catch (e3) { continue; }
+        for (j = 0; j < chars.length; j++) {
+            try {
+                var ca = chars[j].characterAttributes;
+                if (isOld(ca.fillColor)) { ca.fillColor = swap(ca.fillColor); n++; }
+                if (isOld(ca.strokeColor)) { ca.strokeColor = swap(ca.strokeColor); n++; }
+            } catch (e4) {}
+        }
+    }
+    for (i = 0; i < doc.gradients.length; i++) {
+        try {
+            var stops = doc.gradients[i].gradientStops;
+            for (j = 0; j < stops.length; j++) { if (isOld(stops[j].color)) { stops[j].color = swap(stops[j].color); n++; } }
+        } catch (e5) {}
+    }
+    return n;
+}
+
 function bcsGetSpot(doc, d, ctx) {
     var name = bcsTrim(d.spotName), key = name.toLowerCase(), spot, i;
     if (ctx.spotCache[key]) return ctx.spotCache[key];
@@ -601,31 +684,59 @@ function bcsGetSpot(doc, d, ctx) {
     if (spot) {
         try { if (spot.name !== name) spot.name = name; } catch (e2) {}
         try { if (spot.colorType !== ColorModel.SPOT) spot.colorType = ColorModel.SPOT; } catch (e3) {}
-        if (ctx.updateExisting) bcsRedefineExisting(spot, d, ctx);
+        if (ctx.updateExisting) spot = bcsRedefineExisting(spot, d, ctx);
     } else {
         // A plain (non-global) swatch with the same name would block the new spot's name.
         for (i = doc.swatches.length - 1; i >= 0; i--) {
             try { if (String(doc.swatches[i].name).toLowerCase() === key) doc.swatches[i].remove(); } catch (e4) {}
         }
-        spot = doc.spots.add();
-        spot.name = name;
-        ctx.notes.push("added \"" + name + "\" (" + bcsDefineSpot(spot, d, ctx) + ")");
+        spot = ctx.refDoc ? bcsImportSpot(doc, ctx.refDoc, name) : null;
+        if (spot) {
+            ctx.notes.push("added \"" + name + "\" (copied from reference file)");
+        } else {
+            spot = doc.spots.add();
+            spot.name = name;
+            ctx.notes.push("added \"" + name + "\" (" + bcsDefineSpot(spot, d, ctx) + ")");
+        }
         ctx.redefined[key] = true;
     }
     ctx.spotCache[key] = spot;
     return spot;
 }
 
-// "Update same-name spot swatches" option: brings a spot that is already in
-// the file in line with the reference file / rule, once per file.
+// "Redefine target spot swatches" option: brings a spot that is already in the
+// file in line with the reference file (or the rule), once per file. Returns
+// the spot to use from now on.
 function bcsRedefineExisting(spot, d, ctx) {
-    var key = bcsTrim(d.spotName).toLowerCase();
-    if (ctx.redefined[key]) return;
+    var name = bcsTrim(d.spotName), key = name.toLowerCase();
+    if (ctx.redefined[key]) return ctx.spotCache[key] || spot;
     ctx.redefined[key] = true;
+
+    // Preferred: swap in the real swatch from the reference file.
+    if (ctx.refDoc && bcsFindSpot(ctx.refDoc, key)) {
+        var tempName = name + " (old)";
+        try {
+            spot.name = tempName;
+            var fresh = bcsImportSpot(ctx.doc, ctx.refDoc, name);
+            if (fresh) {
+                var moved = bcsRepointSpot(ctx.doc, tempName, fresh, ctx);
+                try { spot.remove(); } catch (e1) {}
+                ctx.notes.push("\"" + name + "\" replaced with the reference file's swatch (" + moved + " uses moved)");
+                ctx.stats.spotsUpdated++;
+                ctx.spotCache[key] = fresh;
+                return fresh;
+            }
+            spot.name = name; // import failed: put the name back
+        } catch (e2) {
+            try { spot.name = name; } catch (e3) {}
+        }
+    }
+    // Fallback: redefine by numbers.
     try {
-        ctx.notes.push("\"" + bcsTrim(d.spotName) + "\" redefined (" + bcsDefineSpot(spot, d, ctx) + ")");
+        ctx.notes.push("\"" + name + "\" redefined (" + bcsDefineSpot(spot, d, ctx) + ")");
         ctx.stats.spotsUpdated++;
-    } catch (e) {}
+    } catch (e4) {}
+    return spot;
 }
 
 function bcsBuildTarget(rule, srcColor, ctx) {
@@ -843,7 +954,8 @@ function bcsProcessDocument(doc, s, fileName) {
         updateExisting: s.updateExistingSwatches,
         notes: [],
         redefined: {},
-        stats: stats
+        stats: stats,
+        refDoc: BCS.refDoc
     };
 
     var paths = doc.pathItems, n = paths.length;
@@ -860,17 +972,18 @@ function bcsProcessDocument(doc, s, fileName) {
                 for (var t = 0; t < tfs.length; t++) bcsProcessTextFrame(tfs[t], rules, ctx, stats);
             }
             if (s.doGradients) bcsProcessGradients(doc, rules, ctx, stats);
+            if (!s.dryRun && s.updateExistingSwatches && ctx.useSpot) {
+                // Also fixes files processed earlier whose target spot was defined wrongly.
+                for (var u = 0; u < rules.length; u++) {
+                    var dd = rules[u].dst;
+                    if (dd.type !== "SPOT" || !bcsTrim(dd.spotName)) continue;
+                    var dkey = bcsTrim(dd.spotName).toLowerCase();
+                    var existing = bcsFindSpot(doc, dkey);
+                    if (existing) ctx.spotCache[dkey] = bcsRedefineExisting(existing, dd, ctx);
+                }
+            }
         } finally {
             if (layerState) bcsRestoreLayers(layerState);
-        }
-        if (!s.dryRun && s.updateExistingSwatches && ctx.useSpot) {
-            // Also fixes files processed earlier whose target spot was defined wrongly.
-            for (var u = 0; u < rules.length; u++) {
-                var dd = rules[u].dst;
-                if (dd.type !== "SPOT" || !bcsTrim(dd.spotName)) continue;
-                var existing = bcsFindSpot(doc, bcsTrim(dd.spotName).toLowerCase());
-                if (existing) bcsRedefineExisting(existing, dd, ctx);
-            }
         }
         if (!s.dryRun && s.removeMatchedSpots) stats.spotsRemoved = bcsRemoveMatchedSpots(doc, rules);
     }
@@ -1023,6 +1136,11 @@ function bcsRunBatch(s) {
 
     var oldUIL = app.userInteractionLevel;
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+    var refHandle = null;
+    if (!s.dryRun && s.swatchLibrary) {
+        try { refHandle = bcsOpenRefDoc(s.swatchLibrary); } catch (er) { refHandle = null; }
+    }
+    BCS.refDoc = refHandle ? refHandle.doc : null;
     var prog = bcsMakeProgress(files.length), cancelled = false, start = new Date().getTime();
 
     try {
@@ -1064,6 +1182,8 @@ function bcsRunBatch(s) {
             if (i % 10 === 9) { try { $.gc(); } catch (eg) {} }
         }
     } finally {
+        bcsCloseRefDoc(refHandle);
+        BCS.refDoc = null;
         app.userInteractionLevel = oldUIL;
         try { prog.w.close(); } catch (ew) {}
     }
@@ -1082,8 +1202,20 @@ function bcsRunBatch(s) {
 
 function bcsRunOnActive(s) {
     if (!app.documents.length) { alert("Open a document first."); return; }
-    var doc = app.activeDocument, name = decodeURI(doc.name);
-    var res = bcsProcessDocument(doc, s, name);
+    var doc = app.activeDocument, name = decodeURI(doc.name), res, refHandle = null;
+    try {
+        if (!s.dryRun && s.swatchLibrary) {
+            try { refHandle = bcsOpenRefDoc(s.swatchLibrary); } catch (er) { refHandle = null; }
+            if (refHandle && refHandle.doc === doc) refHandle = null; // testing on the reference file itself
+            app.activeDocument = doc;
+        }
+        BCS.refDoc = refHandle ? refHandle.doc : null;
+        res = bcsProcessDocument(doc, s, name);
+    } finally {
+        bcsCloseRefDoc(refHandle);
+        BCS.refDoc = null;
+        try { app.activeDocument = doc; } catch (ea) {}
+    }
     try { app.redraw(); } catch (e) {}
     var head = s.dryRun ? "DRY RUN on \"" + name + "\" (nothing changed)" : "Applied to \"" + name + "\" (not saved)";
     var tail = s.dryRun ? "" : "\n\nReview it, then File > Revert if you want to undo everything.";

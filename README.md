@@ -52,10 +52,10 @@ A script can't reach Pantone Connect or Illustrator's recently used swatches. In
 4. In a rule's REPLACE side, choose **Spot color**, then click **Choose from Reference Swatch File...**. This fills in the exact swatch name, so typos can't create a second plate. It also fills in the CMYK values.
 
 **During a batch:**
-- **Spot not in the file yet:** it's added with the reference file's official definition (Lab for Pantone library colors).
-- **Spot already in the file:** the file's own definition is kept. Tick **Redefine target spot swatches already in the files** to make every file match the reference file, or the rule's CMYK if there's no reference file. This also repairs files from an earlier run whose new swatch came out wrong, even when nothing is left to convert in them.
+- **Spot not in the file yet:** the real swatch is copied from the reference file into the document, the same way Illustrator carries swatches when you paste art between files. It keeps Pantone's own definition, Lab mode included.
+- **Spot already in the file:** the file's own definition is kept. Tick **Redefine target spot swatches already in the files** to swap it for the reference file's swatch: every fill, stroke, text character and gradient stop moves to the new swatch with its tint, and the old swatch is removed. Without a reference file, the swatch is redefined with the rule's CMYK. This also repairs files from an earlier run whose new swatch came out wrong, even when nothing is left to convert in them.
 - **Target name not in the reference file:** the spot is built from the CMYK values typed in the rule.
-- **If Illustrator rejects the official Lab definition,** the reference file's CMYK equivalent is used.
+- **If copying fails for any reason,** the swatch is defined from the reference file's values, and the log says so.
 - **A spot with no appearance at all** (no reference file and the rule's CMYK left at 0/0/0/0) would look white. The script won't run until you fix it, unless the spot's name contains "white".
 
 The log notes which of these happened for each file.
@@ -104,6 +104,10 @@ node tests/harness.js
 Test the dialogs and saving in Illustrator itself.
 
 ## Changelog
+
+**1.3**
+- Spot swatches from the reference file are now copied into each document, not rebuilt from numbers, so they keep Pantone's Lab definition. Rebuilding from numbers always produced CMYK-mode swatches.
+- "Redefine target spot swatches" swaps an existing swatch for the reference file's version and moves all its uses, keeping tints.
 
 **1.2**
 - Fixed new spot swatches coming out white when the target color wasn't already in a file and the rule's CMYK was left at 0/0/0/0. Runs are now blocked until the rule has a definition, and the rule editor warns too.
