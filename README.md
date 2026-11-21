@@ -53,8 +53,10 @@ A script can't reach Pantone Connect or Illustrator's recently used swatches. In
 
 **During a batch:**
 - **Spot not in the file yet:** it's added with the reference file's official definition (Lab for Pantone library colors).
-- **Spot already in the file:** the file's own definition is kept. Tick **Also update same-name swatches already in the files** to make every file match the reference.
+- **Spot already in the file:** the file's own definition is kept. Tick **Redefine target spot swatches already in the files** to make every file match the reference file, or the rule's CMYK if there's no reference file. This also repairs files from an earlier run whose new swatch came out wrong, even when nothing is left to convert in them.
 - **Target name not in the reference file:** the spot is built from the CMYK values typed in the rule.
+- **If Illustrator rejects the official Lab definition,** the reference file's CMYK equivalent is used.
+- **A spot with no appearance at all** (no reference file and the rule's CMYK left at 0/0/0/0) would look white. The script won't run until you fix it, unless the spot's name contains "white".
 
 The log notes which of these happened for each file.
 
@@ -100,3 +102,14 @@ node tests/harness.js
 ```
 
 Test the dialogs and saving in Illustrator itself.
+
+## Changelog
+
+**1.2**
+- Fixed new spot swatches coming out white when the target color wasn't already in a file and the rule's CMYK was left at 0/0/0/0. Runs are now blocked until the rule has a definition, and the rule editor warns too.
+- If Illustrator rejects a reference file's Lab definition, the reference CMYK equivalent is used, not the rule's CMYK.
+- "Redefine target spot swatches" now works without a reference file and repairs previously processed files. The log has a new "Spots redefined" column.
+
+**1.1** Reference swatch file, tint scaling for process targets, generic defaults.
+
+**1.0** First release.

@@ -328,7 +328,7 @@ ok('Existing 534 in file: kept by default, replaced when "update existing" is on
   assert.strictEqual(d1.spots.find(x => x.name === 'PANTONE 534 C').color.typename, 'CMYKColor');
   const d2 = mk(); const res = S.bcsProcessDocument(d2, rulesSettings(rule289to534(), { updateExistingSwatches: true }), 'f');
   assert.strictEqual(d2.spots.find(x => x.name === 'PANTONE 534 C').color.typename, 'LabColor');
-  assert.ok(/updated from reference/.test(res.note));
+  assert.ok(/redefined \(from reference file\)/.test(res.note), res.note);
 });
 
 ok('Target not in reference file falls back to typed CMYK and says so in the log', () => {
@@ -358,6 +358,83 @@ ok('Settings round trip keeps new fields', () => {
   const s = S.bcsDefaultSettings(); s.swatchLibrary = '/x/Ref.ai'; s.updateExistingSwatches = true;
   const back = S.bcsNormalizeSettings(S.bcsParse(S.bcsStringify(s)));
   assert.strictEqual(back.swatchLibrary, '/x/Ref.ai'); assert.strictEqual(back.updateExistingSwatches, true);
+});
+
+// ---------- v1.2: never create a white spot by accident ----------
+ok('No reference + rule CMYK left at 0/0/0/0 is detected before running', () => {
+  S.BCS.library = null;
+  const d = S.bcsNormalizeRule({ dst: { type: 'SPOT', spotName: 'PANTONE 534 C' } }).dst;
+  assert.strictEqual(S.bcsSpotWouldBeBlank(d, null), true);
+  assert.strictEqual(S.bcsSpotWouldBeBlank(Object.assign({}, d, { alt: [100, 82, 22, 9] }), null), false);
+  assert.strictEqual(S.bcsSpotWouldBeBlank(Object.assign({}, d, { spotName: 'White' }), null), false, 'white spots are meant to be 0/0/0/0');
+  assert.strictEqual(S.bcsSpotWouldBeBlank(d, refLibrary()), false, 'reference file supplies the definition');
+  const alerts = []; S.alert = m => alerts.push(m);
+  const s = S.bcsDefaultSettings(); s.rules = [S.bcsNormalizeRule({ name: '289 to 534', dst: { type: 'SPOT', spotName: 'PANTONE 534 C' } })];
+  assert.strictEqual(S.bcsBlankSpotProblem(s), true); assert.ok(/WHITE/.test(alerts[0]) && /289 to 534/.test(alerts[0]));
+  s.rules[0].enabled = false; assert.strictEqual(S.bcsBlankSpotProblem(s), false, 'disabled rules ignored');
+});
+
+ok('If Illustrator refuses the Lab definition, the reference CMYK is used (not white)', () => {
+  S.BCS.library = refLibrary();
+  const doc = makeDoc();
+  const origAdd = doc.spots.add;
+  doc.spots.add = function () {
+    const sp = origAdd(); let c = null;
+    Object.defineProperty(sp, 'color', { get: () => c, set: v => { if (v.typename === 'LabColor') throw new Error('no Lab'); c = v; } });
+    return sp;
+  };
+  const p = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
+  doc.pathItems.push(path(spotColor(p)));
+  const res = S.bcsProcessDocument(doc, rulesSettings(rule289to534()), 'f');
+  const sp = doc.spots.find(x => x.name === 'PANTONE 534 C');
+  assert.strictEqual(JSON.stringify([sp.color.cyan, sp.color.magenta, sp.color.yellow, sp.color.black]), '[70,30,0,40]');
+  assert.ok(/CMYK equivalent/.test(res.note), res.note);
+  S.BCS.library = null;
+});
+
+ok('Log warns loudly if a spot is still created blank', () => {
+  S.BCS.library = null;
+  const doc = makeDoc();
+  const p = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
+  doc.pathItems.push(path(spotColor(p)));
+  const rules = rule289to534(); rules[0].dst.alt = [0, 0, 0, 0];
+  const res = S.bcsProcessDocument(doc, rulesSettings(rules), 'f');
+  assert.ok(/WILL LOOK WHITE/.test(res.note), res.note);
+});
+
+ok('Repair: files already converted to a white 534 get fixed by "Redefine" (reference file)', () => {
+  S.BCS.library = refLibrary();
+  const doc = makeDoc();
+  const bad = doc.addSpot('PANTONE 534 C', cmyk(0, 0, 0, 0));
+  doc.pathItems.push(path(spotColor(bad, 60)));          // no 289 left in this file
+  const off = S.bcsProcessDocument(doc, rulesSettings(rule289to534()), 'f');
+  assert.strictEqual(off.status, 'NO_MATCH'); assert.strictEqual(bad.color.typename, 'CMYKColor');
+  const on = S.bcsProcessDocument(doc, rulesSettings(rule289to534(), { updateExistingSwatches: true }), 'f');
+  assert.strictEqual(on.status, 'CHANGED'); assert.strictEqual(on.stats.spotsUpdated, 1);
+  assert.strictEqual(bad.color.typename, 'LabColor');
+  assert.strictEqual(doc.pathItems[0].fillColor.tint, 60, 'objects untouched, tint kept');
+  S.BCS.library = null;
+});
+
+ok('Repair without a reference file uses the rule CMYK; redefined once per file', () => {
+  S.BCS.library = null;
+  const doc = makeDoc();
+  const bad = doc.addSpot('PANTONE 534 C', cmyk(0, 0, 0, 0));
+  const p = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
+  doc.pathItems.push(path(spotColor(p)), path(spotColor(bad)));
+  const rules = rule289to534(); rules[0].dst.alt = [100, 82, 22, 9];
+  const res = S.bcsProcessDocument(doc, rulesSettings(rules, { updateExistingSwatches: true }), 'f');
+  assert.strictEqual(bad.color.cyan, 100); assert.strictEqual(res.stats.spotsUpdated, 1);
+  assert.strictEqual(doc.pathItems[0].fillColor.spot, bad);
+});
+
+ok('Dry run never redefines', () => {
+  S.BCS.library = refLibrary();
+  const doc = makeDoc();
+  const bad = doc.addSpot('PANTONE 534 C', cmyk(0, 0, 0, 0));
+  S.bcsProcessDocument(doc, rulesSettings(rule289to534(), { updateExistingSwatches: true, dryRun: true }), 'f');
+  assert.strictEqual(bad.color.typename, 'CMYKColor');
+  S.BCS.library = null;
 });
 
 ok('Rule summaries render', () => {
