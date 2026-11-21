@@ -38,7 +38,7 @@ function path(fill, stroke, opts) {
 }
 
 const src = fs.readFileSync(__dirname + '/../Batch_Color_Swap.jsx', 'utf8').replace(/^#target.*$/m, '');
-const ctx = { CMYKColor, RGBColor, GrayColor, NoColor, SpotColor, ColorModel, LabColor, SpotColorKind, ImageColorSpace, ColorConvertPurpose, app, BCS_NO_AUTORUN: true };
+const ctx = { ElementPlacement: { PLACEATBEGINNING: 'PLACEATBEGINNING' }, CMYKColor, RGBColor, GrayColor, NoColor, SpotColor, ColorModel, LabColor, SpotColorKind, ImageColorSpace, ColorConvertPurpose, app, BCS_NO_AUTORUN: true };
 vm.createContext(ctx);
 vm.runInContext(src, ctx);
 const S = ctx;
@@ -435,6 +435,94 @@ ok('Dry run never redefines', () => {
   S.bcsProcessDocument(doc, rulesSettings(rule289to534(), { updateExistingSwatches: true, dryRun: true }), 'f');
   assert.strictEqual(bad.color.typename, 'CMYKColor');
   S.BCS.library = null;
+});
+
+// ---------- v1.3: copy the real swatch from the reference document ----------
+// Mock of Illustrator's cross-document duplicate: the spot travels with the art.
+// If the target already has a spot with that name, Illustrator keeps the
+// target's own (merge), just like the swatch-conflict default.
+function withLayers(doc) {
+  doc.layers.add = function () {
+    const L = { typename: 'Layer', name: 'Layer', locked: false, visible: true, layers: [], doc,
+      remove() { doc.layers.splice(doc.layers.indexOf(L), 1); } };
+    L.pathItems = { rectangle() {
+      const it = { filled: false, stroked: true, fillColor: null, remove() { it.removed = true; },
+        duplicate(target) {
+          if (doc.failDuplicate) throw new Error('duplicate failed');
+          const td = target.doc, nm = it.fillColor.spot.name;
+          if (!td.spots.find(x => x.name.toLowerCase() === nm.toLowerCase())) {
+            const sp = td.spots.add(); sp.name = nm; sp.color = it.fillColor.spot.color; sp.colorType = it.fillColor.spot.colorType;
+          }
+          return { remove() {} };
+        } };
+      return it; } };
+    doc.layers.push(L); return L;
+  };
+  return doc;
+}
+function refDocWith534() { const r = withLayers(makeDoc()); r.addSpot('PANTONE 534 C', lab(28, 2, -30)); return r; }
+
+ok('New 534 is COPIED from the reference document (keeps Lab), no temp layers left', () => {
+  S.BCS.library = refLibrary(); const ref = refDocWith534(); S.BCS.refDoc = ref;
+  const doc = withLayers(makeDoc());
+  const p = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
+  const a = path(spotColor(p, 40)); doc.pathItems.push(a);
+  const res = S.bcsProcessDocument(doc, rulesSettings(rule289to534()), 'f');
+  const sp = doc.spots.find(x => x.name === 'PANTONE 534 C');
+  assert.strictEqual(sp.color.typename, 'LabColor'); assert.strictEqual(sp.color, ref.spots[0].color, 'same definition object as reference');
+  assert.strictEqual(a.fillColor.spot, sp); assert.strictEqual(a.fillColor.tint, 40);
+  assert.ok(/copied from reference file/.test(res.note), res.note);
+  assert.strictEqual(doc.layers.length, 0); assert.strictEqual(ref.layers.length, 0);
+  S.BCS.refDoc = null; S.BCS.library = null;
+});
+
+ok('Redefine swaps an existing CMYK 534 for the reference swatch and moves every use', () => {
+  S.BCS.library = refLibrary(); const ref = refDocWith534(); S.BCS.refDoc = ref;
+  const doc = withLayers(makeDoc());
+  const oldSp = doc.addSpot('PANTONE 534 C', cmyk(100, 82, 22, 9));
+  const a = path(spotColor(oldSp, 60), spotColor(oldSp));
+  const chars = [{ characterAttributes: { fillColor: spotColor(oldSp, 30), strokeColor: new NoColor() } }];
+  doc.pathItems.push(a);
+  doc.textFrames.push({ typename: 'TextFrame', parent: null, textRange: { characters: chars } });
+  doc.gradients.push({ gradientStops: [{ color: spotColor(oldSp, 100) }] });
+  const res = S.bcsProcessDocument(doc, rulesSettings(rule289to534(), { updateExistingSwatches: true }), 'f');
+  const now = doc.spots.filter(x => /534/.test(x.name));
+  assert.strictEqual(now.length, 1, 'old swatch removed: ' + now.map(x => x.name));
+  assert.strictEqual(now[0].name, 'PANTONE 534 C'); assert.strictEqual(now[0].color.typename, 'LabColor');
+  assert.strictEqual(a.fillColor.spot, now[0]); assert.strictEqual(a.fillColor.tint, 60);
+  assert.strictEqual(a.strokeColor.spot, now[0]);
+  assert.strictEqual(chars[0].characterAttributes.fillColor.spot, now[0]); assert.strictEqual(chars[0].characterAttributes.fillColor.tint, 30);
+  assert.strictEqual(doc.gradients[0].gradientStops[0].color.spot, now[0]);
+  assert.strictEqual(res.status, 'CHANGED'); assert.strictEqual(res.stats.spotsUpdated, 1);
+  assert.ok(/replaced with the reference file's swatch \(4 uses moved\)/.test(res.note), res.note);
+  S.BCS.refDoc = null; S.BCS.library = null;
+});
+
+ok('289 -> 534 in a file that already has a CMYK 534, with Redefine on: everything ends on the Lab swatch', () => {
+  S.BCS.library = refLibrary(); const ref = refDocWith534(); S.BCS.refDoc = ref;
+  const doc = withLayers(makeDoc());
+  const oldSp = doc.addSpot('PANTONE 534 C', cmyk(100, 82, 22, 9));
+  const p289 = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
+  const a = path(spotColor(p289)), b = path(spotColor(oldSp, 50));
+  doc.pathItems.push(a, b);
+  S.bcsProcessDocument(doc, rulesSettings(rule289to534(), { updateExistingSwatches: true, removeMatchedSpots: true }), 'f');
+  const sp534 = doc.spots.filter(x => /534/.test(x.name));
+  assert.strictEqual(sp534.length, 1); assert.strictEqual(sp534[0].color.typename, 'LabColor');
+  assert.strictEqual(a.fillColor.spot, sp534[0]); assert.strictEqual(b.fillColor.spot, sp534[0]); assert.strictEqual(b.fillColor.tint, 50);
+  assert.ok(!doc.spots.find(x => /289/.test(x.name)));
+  S.BCS.refDoc = null; S.BCS.library = null;
+});
+
+ok('If copying fails, falls back to defining by numbers (and says so)', () => {
+  S.BCS.library = refLibrary(); const ref = refDocWith534(); ref.failDuplicate = true; S.BCS.refDoc = ref;
+  const doc = withLayers(makeDoc());
+  const p = doc.addSpot('PANTONE 289 C', cmyk(1, 1, 1, 1));
+  doc.pathItems.push(path(spotColor(p)));
+  const res = S.bcsProcessDocument(doc, rulesSettings(rule289to534()), 'f');
+  assert.ok(doc.spots.find(x => x.name === 'PANTONE 534 C'));
+  assert.ok(/from reference file\)/.test(res.note) && !/copied/.test(res.note), res.note);
+  assert.strictEqual(doc.layers.length, 0); assert.strictEqual(ref.layers.length, 0, 'temp layers cleaned up after failure');
+  S.BCS.refDoc = null; S.BCS.library = null;
 });
 
 ok('Rule summaries render', () => {
