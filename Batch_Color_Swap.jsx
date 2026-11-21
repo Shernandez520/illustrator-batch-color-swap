@@ -24,7 +24,7 @@
    ========================================================================== */
 
 var BCS = {
-    VERSION: "1.1",
+    VERSION: "1.2",
     library: null,
     libraryPath: "",
     APP_FOLDER_NAME: "BatchColorSwap",
@@ -541,37 +541,67 @@ function bcsLoadLibrary(path) {
     }
 }
 
-// Sets a spot's definition: from the reference file when it has this name,
-// otherwise from the CMYK values typed in the rule. Returns "reference" | "typed".
+function bcsIsBlank(v) {
+    return !v || (bcsNum(v[0], 0) === 0 && bcsNum(v[1], 0) === 0 && bcsNum(v[2], 0) === 0 && bcsNum(v[3], 0) === 0);
+}
+
+// True when a spot target would be created as 0/0/0/0 (looks white) without
+// meaning to: no reference definition for it and no CMYK typed in the rule.
+function bcsSpotWouldBeBlank(d, library) {
+    if (d.type !== "SPOT") return false;
+    if (/white/i.test(d.spotName)) return false;
+    var ref = library ? library.byName[bcsTrim(d.spotName).toLowerCase()] : null;
+    if (ref) return false;
+    return bcsIsBlank(d.alt);
+}
+
+function bcsSetSpotColor(spot, color) {
+    spot.color = color;
+    spot.colorType = ColorModel.SPOT;
+}
+
+// Sets a spot's definition. Order of preference:
+//   1. the reference file's own definition (Lab for Pantone library colors)
+//   2. the reference file's CMYK equivalent, if Illustrator refused the Lab
+//   3. the CMYK typed in the rule
+// Returns a short note for the log.
 function bcsDefineSpot(spot, d, ctx) {
     var ref = ctx.library ? ctx.library.byName[bcsTrim(d.spotName).toLowerCase()] : null;
     if (ref) {
         try {
-            spot.color = bcsMakeColorFromData(ref);
-            spot.colorType = ColorModel.SPOT;
+            bcsSetSpotColor(spot, bcsMakeColorFromData(ref));
             if (ref.model === "LAB") { try { spot.spotKind = SpotColorKind.SPOTLAB; } catch (e0) {} }
-            return "reference";
+            return "from reference file";
         } catch (e) {}
+        if (ref.cmyk && !bcsIsBlank(ref.cmyk)) {
+            try {
+                bcsSetSpotColor(spot, bcsMakeCMYK(ref.cmyk));
+                return "from reference file's CMYK equivalent";
+            } catch (e2) {}
+        }
     }
-    spot.color = bcsMakeCMYK(d.alt);
-    spot.colorType = ColorModel.SPOT;
-    return "typed";
+    bcsSetSpotColor(spot, bcsMakeCMYK(d.alt));
+    var how = (ctx.library ? "NOT in reference file - " : "") + "from the rule's CMYK";
+    if (bcsIsBlank(d.alt)) how += " 0/0/0/0 - WILL LOOK WHITE";
+    return how;
+}
+
+function bcsFindSpot(doc, key) {
+    for (var i = 0; i < doc.spots.length; i++) {
+        try { if (String(doc.spots[i].name).toLowerCase() === key) return doc.spots[i]; } catch (e) {}
+    }
+    return null;
 }
 
 function bcsGetSpot(doc, d, ctx) {
-    var name = bcsTrim(d.spotName), key = name.toLowerCase(), spot = null, i;
+    var name = bcsTrim(d.spotName), key = name.toLowerCase(), spot, i;
     if (ctx.spotCache[key]) return ctx.spotCache[key];
-    var inRef = !!(ctx.library && ctx.library.byName[key]);
 
-    for (i = 0; i < doc.spots.length; i++) {
-        try { if (String(doc.spots[i].name).toLowerCase() === key) { spot = doc.spots[i]; break; } } catch (e) {}
-    }
+    spot = bcsFindSpot(doc, key);
     if (spot) {
         try { if (spot.name !== name) spot.name = name; } catch (e2) {}
         try { if (spot.colorType !== ColorModel.SPOT) spot.colorType = ColorModel.SPOT; } catch (e3) {}
-        if (inRef && ctx.updateExisting) {
-            try { bcsDefineSpot(spot, d, ctx); ctx.notes.push("\"" + name + "\" updated from reference file"); } catch (e5) {}
-        }
+        if (ctx.updateExisting) bcsRedefineExisting(spot, d, ctx);
     } else {
         // A plain (non-global) swatch with the same name would block the new spot's name.
         for (i = doc.swatches.length - 1; i >= 0; i--) {
@@ -579,12 +609,23 @@ function bcsGetSpot(doc, d, ctx) {
         }
         spot = doc.spots.add();
         spot.name = name;
-        var how = bcsDefineSpot(spot, d, ctx);
-        ctx.notes.push("added \"" + name + "\" (" + (how === "reference" ? "from reference file" :
-            (ctx.library ? "NOT in reference file - used typed CMYK" : "typed CMYK")) + ")");
+        ctx.notes.push("added \"" + name + "\" (" + bcsDefineSpot(spot, d, ctx) + ")");
+        ctx.redefined[key] = true;
     }
     ctx.spotCache[key] = spot;
     return spot;
+}
+
+// "Update same-name spot swatches" option: brings a spot that is already in
+// the file in line with the reference file / rule, once per file.
+function bcsRedefineExisting(spot, d, ctx) {
+    var key = bcsTrim(d.spotName).toLowerCase();
+    if (ctx.redefined[key]) return;
+    ctx.redefined[key] = true;
+    try {
+        ctx.notes.push("\"" + bcsTrim(d.spotName) + "\" redefined (" + bcsDefineSpot(spot, d, ctx) + ")");
+        ctx.stats.spotsUpdated++;
+    } catch (e) {}
 }
 
 function bcsBuildTarget(rule, srcColor, ctx) {
@@ -684,7 +725,7 @@ function bcsUseSpotFor(fileName, s) {
 }
 
 function bcsNewStats() {
-    return { fills: 0, strokes: 0, text: 0, gradStops: 0, layersHidden: 0, spotsRemoved: 0, failed: 0 };
+    return { fills: 0, strokes: 0, text: 0, gradStops: 0, layersHidden: 0, spotsRemoved: 0, spotsUpdated: 0, failed: 0 };
 }
 
 function bcsApply(owner, getColor, isOn, setColor, setNone, which, statKey, rules, ctx, stats) {
@@ -800,7 +841,9 @@ function bcsProcessDocument(doc, s, fileName) {
         dry: s.dryRun,
         library: BCS.library,
         updateExisting: s.updateExistingSwatches,
-        notes: []
+        notes: [],
+        redefined: {},
+        stats: stats
     };
 
     var paths = doc.pathItems, n = paths.length;
@@ -820,13 +863,22 @@ function bcsProcessDocument(doc, s, fileName) {
         } finally {
             if (layerState) bcsRestoreLayers(layerState);
         }
+        if (!s.dryRun && s.updateExistingSwatches && ctx.useSpot) {
+            // Also fixes files processed earlier whose target spot was defined wrongly.
+            for (var u = 0; u < rules.length; u++) {
+                var dd = rules[u].dst;
+                if (dd.type !== "SPOT" || !bcsTrim(dd.spotName)) continue;
+                var existing = bcsFindSpot(doc, bcsTrim(dd.spotName).toLowerCase());
+                if (existing) bcsRedefineExisting(existing, dd, ctx);
+            }
+        }
         if (!s.dryRun && s.removeMatchedSpots) stats.spotsRemoved = bcsRemoveMatchedSpots(doc, rules);
     }
     if (!s.dryRun) stats.layersHidden = bcsHideLayers(doc, s.hideLayers);
 
     var changes = stats.fills + stats.strokes + stats.text + stats.gradStops;
     var status;
-    if (changes > 0 || stats.layersHidden > 0 || stats.spotsRemoved > 0) status = "CHANGED";
+    if (changes > 0 || stats.layersHidden > 0 || stats.spotsRemoved > 0 || stats.spotsUpdated > 0) status = "CHANGED";
     else status = rules.length ? "NO_MATCH" : "NO_RULES";
     var note = (ctx.useSpot ? "spot mode" : "process mode") + "; " + rules.length + " rule(s) applied" +
                (ctx.notes.length ? "; " + ctx.notes.join("; ") : "");
@@ -836,7 +888,7 @@ function bcsProcessDocument(doc, s, fileName) {
 function bcsStatsText(st) {
     return "Fills: " + st.fills + "   Strokes: " + st.strokes + "   Text chars: " + st.text +
            "   Gradient stops: " + st.gradStops + "\nLayers hidden: " + st.layersHidden +
-           "   Old spots deleted: " + st.spotsRemoved + (st.failed ? "   Could not change: " + st.failed : "");
+           "   Old spots deleted: " + st.spotsRemoved + "   Spots redefined: " + st.spotsUpdated + (st.failed ? "   Could not change: " + st.failed : "");
 }
 
 // ==========================================================================
@@ -965,7 +1017,7 @@ function bcsRunBatch(s) {
     }
 
     var logFile = new File(root.fsName + "/ColorSwap_Log_" + bcsTimestamp(true) + (s.dryRun ? "_DRYRUN" : "") + ".csv");
-    bcsAppendLine(logFile, "File,Status,Fills,Strokes,Text chars,Gradient stops,Layers hidden,Old spots deleted,Could not change,Saved to,Notes");
+    bcsAppendLine(logFile, "File,Status,Fills,Strokes,Text chars,Gradient stops,Layers hidden,Old spots deleted,Spots redefined,Could not change,Saved to,Notes");
     var failedFolder = new Folder(root.fsName + "/" + BCS.FAILED_FOLDER);
     var tally = { CHANGED: 0, NO_MATCH: 0, NO_RULES: 0, SKIPPED: 0, FAILED: 0, RESUMED: 0 };
 
@@ -1000,12 +1052,12 @@ function bcsRunBatch(s) {
                 if (!s.dryRun) {
                     try { bcsEnsureFolder(failedFolder); file.copy(failedFolder.fsName + "/" + decodeURI(file.name)); } catch (ef) {}
                 }
-                bcsAppendLine(logFile, [bcsCsv(rel), "FAILED", "", "", "", "", "", "", "", "", bcsCsv(lastErr)].join(","));
+                bcsAppendLine(logFile, [bcsCsv(rel), "FAILED", "", "", "", "", "", "", "", "", "", bcsCsv(lastErr)].join(","));
             } else {
                 tally[res.status] = (tally[res.status] || 0) + 1;
                 var st = res.stats;
                 bcsAppendLine(logFile, [bcsCsv(rel), res.status, st.fills, st.strokes, st.text, st.gradStops,
-                    st.layersHidden, st.spotsRemoved, st.failed, bcsCsv(res.savedTo || ""), bcsCsv(res.note || "")].join(","));
+                    st.layersHidden, st.spotsRemoved, st.spotsUpdated, st.failed, bcsCsv(res.savedTo || ""), bcsCsv(res.note || "")].join(","));
             }
             if (!s.dryRun) bcsAppendLine(resumeFile, rel);
 
@@ -1566,6 +1618,9 @@ function bcsEditRuleDialog(rule) {
         if (!out.fill && !out.stroke) { alert("Tick Fills and/or Strokes."); return; }
         if (out.src.type === "SPOT" && !out.src.spotName) { alert("Enter the spot / swatch name to find."); return; }
         if (out.dst.type === "SPOT" && !out.dst.spotName) { alert("Enter the name of the spot color to replace with."); return; }
+        if (bcsSpotWouldBeBlank(out.dst, BCS.library) &&
+            !confirm("The spot \"" + out.dst.spotName + "\" has no CMYK appearance (all zeros) and isn't in a reference swatch file.\n\n" +
+                     "Files that don't already have this swatch would get it as WHITE.\n\nSave the rule anyway?")) return;
         if (!out.name) out.name = bcsDescribeSrc(out.src) + " to " + bcsDescribeDst(out.dst);
         result = bcsNormalizeRule(out);
         w.close(1);
@@ -1804,7 +1859,7 @@ function bcsShowMainDialog(settings) {
     var bLibClr = gl.add("button", undefined, "Clear");
     var stLib = lp.add("statictext", undefined, "", { multiline: true });
     stLib.preferredSize = [400, 30];
-    var cbUpd = lp.add("checkbox", undefined, "Also update same-name swatches already in the files");
+    var cbUpd = lp.add("checkbox", undefined, "Redefine target spot swatches already in the files (fixes ones that look wrong)");
     cbUpd.value = s.updateExistingSwatches;
     function syncLib() {
         var path = bcsTrim(etLib.text);
@@ -1812,7 +1867,6 @@ function bcsShowMainDialog(settings) {
         else if (BCS.library && BCS.libraryPath === path)
             stLib.text = BCS.library.names.length + " spot swatch(es) loaded. Used whenever a rule's target spot name matches.";
         else stLib.text = "Will be read when you test or run the batch.";
-        cbUpd.enabled = !!path;
     }
     etLib.onChanging = syncLib;
     bLibClr.onClick = function () { etLib.text = ""; syncLib(); };
@@ -1944,6 +1998,20 @@ function bcsEnsureLibrary(s, quiet) {
     }
 }
 
+// Stops before a run that would create a spot that looks white by accident.
+function bcsBlankSpotProblem(s) {
+    var names = [];
+    for (var i = 0; i < s.rules.length; i++) {
+        var r = s.rules[i];
+        if (r.enabled && bcsSpotWouldBeBlank(r.dst, BCS.library)) names.push("  - " + (r.name || bcsDescribeDst(r.dst)));
+    }
+    if (!names.length) return false;
+    alert("These rules replace with a spot color that has no appearance defined:\n\n" + names.join("\n") +
+          "\n\nIn files that don't already have that swatch it would be created as C0 M0 Y0 K0 and look WHITE.\n\n" +
+          "Fix: edit the rule and either click \"Choose from Reference Swatch File...\" or type the color's CMYK values under REPLACE.");
+    return true;
+}
+
 function bcsMain() {
     var s = bcsLoadSettings();
     bcsEnsureExamplePreset();
@@ -1960,6 +2028,7 @@ function bcsMain() {
             continue;
         }
         if (!bcsEnsureLibrary(s, false)) continue;
+        if (bcsBlankSpotProblem(s)) continue;
         if (r.action === "test") { bcsRunOnActive(s); continue; }
         if (r.action === "batch") { bcsRunBatch(s); return; }
     }
